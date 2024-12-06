@@ -12,6 +12,7 @@ from PIL import Image, ImageDraw
 import sys
 import os
 import cv2  # Added for video processing
+import time
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../')))
 from src.core import YAMLConfig
@@ -74,6 +75,7 @@ def process_video(model, device, file_path):
     frame_count = 0
     print("Processing video frames...")
     while cap.isOpened():
+        start = time.time()
         ret, frame = cap.read()
         if not ret:
             break
@@ -96,7 +98,8 @@ def process_video(model, device, file_path):
         frame = cv2.cvtColor(np.array(frame_pil), cv2.COLOR_RGB2BGR)
 
         # Write the frame
-        out.write(frame)
+        #out.write(frame)
+        print(time.time() - start, w, h)
         frame_count += 1
 
         if frame_count % 10 == 0:
@@ -143,8 +146,10 @@ def main(args):
     # Check if the input file is an image or a video
     file_path = args.input
     if os.path.splitext(file_path)[-1].lower() in ['.jpg', '.jpeg', '.png', '.bmp']:
+        start = time.time()
         # Process as image
         process_image(model, device, file_path)
+        print(time.time() - start)
         print("Image processing complete.")
     else:
         # Process as video

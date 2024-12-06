@@ -4,61 +4,20 @@ Copyright(c) 2023 lyuwenyu. All Rights Reserved.
 """
 
 import torch
-import torch.utils.data as data
 import torch.nn.functional as F
-from torch.utils.data import default_collate
-
 import torchvision
-import torchvision.transforms.v2 as VT
-from torchvision.transforms.v2 import functional as VF, InterpolationMode
-
 import random
-from functools import partial
 
-from ..core import register
 torchvision.disable_beta_transforms_warning()
 
 
 __all__ = [
-    'DataLoader',
     'BaseCollateFunction',
     'BatchImageCollateFunction',
     'batch_image_collate_fn'
 ]
 
 
-@register()
-class DataLoader(data.DataLoader):
-    __inject__ = ['dataset', 'collate_fn']
-
-    def __repr__(self) -> str:
-        format_string = self.__class__.__name__ + "("
-        for n in ['dataset', 'batch_size', 'num_workers', 'drop_last', 'collate_fn']:
-            format_string += "\n"
-            format_string += "    {0}: {1}".format(n, getattr(self, n))
-        format_string += "\n)"
-        return format_string
-
-    def set_epoch(self, epoch):
-        self._epoch = epoch
-        self.dataset.set_epoch(epoch)
-        self.collate_fn.set_epoch(epoch)
-
-    @property
-    def epoch(self):
-        return self._epoch if hasattr(self, '_epoch') else -1
-
-    @property
-    def shuffle(self):
-        return self._shuffle
-
-    @shuffle.setter
-    def shuffle(self, shuffle):
-        assert isinstance(shuffle, bool), 'shuffle must be a boolean'
-        self._shuffle = shuffle
-
-
-@register()
 def batch_image_collate_fn(items):
     """only batch image
     """
@@ -85,7 +44,6 @@ def generate_scales(base_size, base_size_repeat):
     return scales
 
 
-@register()
 class BatchImageCollateFunction(BaseCollateFunction):
     def __init__(
         self,
@@ -99,17 +57,12 @@ class BatchImageCollateFunction(BaseCollateFunction):
         self.scales = generate_scales(base_size, base_size_repeat) if base_size_repeat is not None else None
         self.stop_epoch = stop_epoch if stop_epoch is not None else 100000000
         self.ema_restart_decay = ema_restart_decay
-        # self.interpolation = interpolation
 
     def __call__(self, items):
         images = torch.cat([x[0][None] for x in items], dim=0)
         targets = [x[1] for x in items]
 
         if self.scales is not None and self.epoch < self.stop_epoch:
-            # sz = random.choice(self.scales)
-            # sz = [sz] if isinstance(sz, int) else list(sz)
-            # VF.resize(inpt, sz, interpolation=self.interpolation)
-
             sz = random.choice(self.scales)
             images = F.interpolate(images, size=sz)
             if 'masks' in targets[0]:

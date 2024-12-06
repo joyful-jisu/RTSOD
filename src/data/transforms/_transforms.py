@@ -15,27 +15,18 @@ import PIL.Image
 
 from typing import Any, Dict, List, Optional
 
-from .._misc import convert_to_tv_tensor, _boxes_keys
+from .._misc import convert_to_tv_tensor
 from .._misc import Image, Video, Mask, BoundingBoxes
-from .._misc import SanitizeBoundingBoxes
 
-from ...core import register
 torchvision.disable_beta_transforms_warning()
 
 
-RandomPhotometricDistort = register()(T.RandomPhotometricDistort)
-RandomZoomOut = register()(T.RandomZoomOut)
-RandomHorizontalFlip = register()(T.RandomHorizontalFlip)
-Resize = register()(T.Resize)
-# ToImageTensor = register()(T.ToImageTensor)
-# ConvertDtype = register()(T.ConvertDtype)
-# PILToTensor = register()(T.PILToTensor)
-SanitizeBoundingBoxes = register(name='SanitizeBoundingBoxes')(SanitizeBoundingBoxes)
-RandomCrop = register()(T.RandomCrop)
-Normalize = register()(T.Normalize)
+RandomPhotometricDistort = T.RandomPhotometricDistort()
+RandomZoomOut = T.RandomZoomOut()
+RandomHorizontalFlip = T.RandomHorizontalFlip()
 
 
-@register()
+
 class EmptyTransform(T.Transform):
     def __init__(self, ) -> None:
         super().__init__()
@@ -45,7 +36,6 @@ class EmptyTransform(T.Transform):
         return inputs
 
 
-@register()
 class PadToSize(T.Pad):
     _transformed_types = (
         PIL.Image.Image,
@@ -78,7 +68,6 @@ class PadToSize(T.Pad):
         return outputs
 
 
-@register()
 class RandomIoUCrop(T.RandomIoUCrop):
     def __init__(self, min_scale: float = 0.3, max_scale: float = 1, min_aspect_ratio: float = 0.5, max_aspect_ratio: float = 2, sampler_options: Optional[List[float]] = None, trials: int = 40, p: float = 1.0):
         super().__init__(min_scale, max_scale, min_aspect_ratio, max_aspect_ratio, sampler_options, trials)
@@ -91,7 +80,6 @@ class RandomIoUCrop(T.RandomIoUCrop):
         return super().forward(*inputs)
 
 
-@register()
 class ConvertBoxes(T.Transform):
     _transformed_types = (
         BoundingBoxes,
@@ -102,11 +90,11 @@ class ConvertBoxes(T.Transform):
         self.normalize = normalize
 
     def _transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
-        spatial_size = getattr(inpt, _boxes_keys[1])
+        spatial_size = inpt.canvas_size
         if self.fmt:
             in_fmt = inpt.format.value.lower()
             inpt = torchvision.ops.box_convert(inpt, in_fmt=in_fmt, out_fmt=self.fmt.lower())
-            inpt = convert_to_tv_tensor(inpt, key='boxes', box_format=self.fmt.upper(), spatial_size=spatial_size)
+            inpt = convert_to_tv_tensor(inpt, box_format=self.fmt.upper(), spatial_size=spatial_size)
 
         if self.normalize:
             inpt = inpt / torch.tensor(spatial_size[::-1]).tile(2)[None]
@@ -114,7 +102,6 @@ class ConvertBoxes(T.Transform):
         return inpt
 
 
-@register()
 class ConvertPILImage(T.Transform):
     _transformed_types = (
         PIL.Image.Image,
