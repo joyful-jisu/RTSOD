@@ -1,8 +1,3 @@
-"""
-Copied from RT-DETR (https://github.com/lyuwenyu/RT-DETR)
-Copyright(c) 2023 lyuwenyu. All Rights Reserved.
-"""
-
 import torch
 import torch.nn as nn
 
@@ -25,12 +20,6 @@ class ConvNormLayer(nn.Module):
 
 
 class FrozenBatchNorm2d(nn.Module):
-    """copy and modified from https://github.com/facebookresearch/detr/blob/master/models/backbone.py
-    BatchNorm2d where the batch statistics and the affine parameters are fixed.
-    Copy-paste from torchvision.misc.ops with added eps before rqsrt,
-    without which any other models than torchvision.models.resnet[18,34,50,101]
-    produce nans.
-    """
     def __init__(self, num_features, eps=1e-5):
         super(FrozenBatchNorm2d, self).__init__()
         n = num_features

@@ -1,10 +1,3 @@
-"""
-reference
-- https://github.com/PaddlePaddle/PaddleDetection/blob/develop/ppdet/modeling/backbones/hgnet_v2.py
-
-Copyright (c) 2024 The D-FINE Authors. All Rights Reserved.
-"""
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F

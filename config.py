@@ -35,9 +35,9 @@ class Config:
             backbone=HGNetv2(name="B5", 
                             return_idx=[1, 2, 3], 
                             freeze_stem_only=True, freeze_at=0, freeze_norm=True, pretrained=True), 
-                            decoder=DFINETransformer(feat_channels=[384, 384, 384], reg_scale=8), 
-                            encoder=HybridEncoder(hidden_dim=384, dim_feedforward=2048))
-
+            decoder=DFINETransformer(feat_channels=[384, 384, 384], reg_scale=8), 
+            encoder=HybridEncoder(hidden_dim=384, dim_feedforward=2048))
+                 
         self._postprocessor :nn.Module = None
         self._criterion :nn.Module = None
         self._optimizer :optim.Optimizer = None

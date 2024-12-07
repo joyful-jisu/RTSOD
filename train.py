@@ -1,257 +1,108 @@
-"""
-D-FINE: Redefine Regression Task of DETRs as Fine-grained Distribution Refinement
-Copyright (c) 2024 The D-FINE Authors. All Rights Reserved.
----------------------------------------------------------------------------------
-Modified from RT-DETR (https://github.com/lyuwenyu/RT-DETR)
-Copyright (c) 2023 lyuwenyu. All Rights Reserved.
-"""
-
-import os
-import sys
 import torch
-import torch.nn as nn
-
-from datetime import datetime
-from pathlib import Path
-from typing import Dict
-
-from tqdm import tqdm
-import sys
-import math
-import torch
-import torch.amp
-
-from src.data import CocoEvaluator
-from config import Config
-
-
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
-
+import torchvision.transforms.v2 as T
+import tqdm
+from src.data.dataloader import BatchImageCollateFunction
+from src.data.coco_dataset import CocoDetection
+from src.data.transforms._transforms import ConvertBoxes, ConvertPILImage
+from src.data.transforms.container import Compose
+from src.nn.backbone.hgnetv2 import HGNetv2
+from src.nn.model import Model
+from src.nn.criterion import Criterion
+from src.nn.decoder import Transformer
+from src.nn.hybrid_encoder import HybridEncoder
+from torch.optim.adamw import AdamW
+from torch.utils.data import DataLoader
+from src.nn.matcher import HungarianMatcher
+import torch.optim.lr_scheduler as lr_scheduler
+from torch.utils.data.sampler import BatchSampler, RandomSampler
 
 
-class Trainer(object):
-    def __init__(self, cfg: Config) -> None:
-        self.cfg = cfg
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.model = cfg.model
-        self.model.to(self.device)
-        self.criterion = self.to(cfg.criterion, self.device)
-        self.postprocessor = self.to(cfg.postprocessor, self.device)
-        self.ema = self.to(cfg.ema, self.device)
-        self.scaler = cfg.scaler
-        self.last_epoch = cfg.last_epoch
-        self.output_dir = Path(cfg.output_dir)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.optimizer = cfg.optimizer
-        self.lr_scheduler = cfg.lr_scheduler
-        self.lr_warmup_scheduler = cfg.lr_warmup_scheduler
-        self.train_dataloader = cfg.train_dataloader
-        self.val_dataloader = cfg.val_dataloader
-        self.evaluator = cfg.evaluator
+train_data_source = CocoDetection(
+        img_folder="./dataset/images/train",
+        ann_file="./dataset/annotations/instances_train.json",
+        return_masks=False,
+        transforms=Compose(
+            ops=[
+                T.RandomPhotometricDistort(p=0.5),
+                T.RandomZoomOut(fill=0),
+                T.RandomIoUCrop(),
+                T.SanitizeBoundingBoxes(min_size=1),
+                T.RandomHorizontalFlip(),
+                T.Resize(size=[640, 640], ),
+                T.SanitizeBoundingBoxes(min_size=1),
+                ConvertPILImage(dtype='float32', scale=True),
+                ConvertBoxes(fmt='cxcywh', normalize=True),
+        ],
+        policy={'name': 'stop_epoch', 
+                'epoch': 72, 
+                'ops': ['RandomPhotometricDistort', 'RandomZoomOut', 'RandomIoUCrop']}),
+) 
+val_data_source = CocoDetection(
+    img_folder="./dataset/images/val",
+    ann_file="./dataset/annotations/instances_val.json",
+    return_masks=False,
+    transforms=Compose(ops=[
+                T.Resize(size=[640, 640]),
+                ConvertPILImage(dtype='float32', scale=True),
+            ]),
+) 
 
-        self.setup()
+train_dataloader = DataLoader(
+    dataset=train_data_source,
+    num_workers=4,
+    prefetch_factor=2,
+    pin_memory=False,
+    pin_memory_device="",
+    timeout=0,
+    worker_init_fn=None,
+    multiprocessing_context=None,
+    batch_sampler=BatchSampler(RandomSampler(train_data_source), batch_size=4, drop_last=True),
+    generator=None,
+    collate_fn=BatchImageCollateFunction(),
+    persistent_workers=False,
+)
 
-    def setup(self):
-        self.model.train()
-        self.criterion.train()
+model = Model(
+            backbone=HGNetv2(name="B5", 
+                            return_idx=[1, 2, 3], 
+                            freeze_stem_only=True, 
+                            freeze_at=0, 
+                            freeze_norm=True, 
+                            pretrained=True), 
+            decoder=Transformer(num_classes=12, feat_channels=[384, 384, 384], reg_scale=8), 
+            encoder=HybridEncoder(hidden_dim=384, dim_feedforward=2048))
 
-        for param in self.model.parameters():
-            param.data = param.data.float()
-            param.requires_grad = True
-        for param in self.criterion.parameters():
-             param.data = param.data.float()
-             param.requires_grad = True
+model.train()
+model.to('cuda')
 
-    def to(self, module, device):
-        return module.to(device) if hasattr(module, 'to') else module
+criterion = Criterion(
+    matcher=HungarianMatcher(weight_dict={'cost_class': 2, 'cost_bbox': 5, 'cost_giou': 2},
+                             alpha=0.25, gamma=2.0),
+    losses=['vfl', 'boxes', 'local'],
+    weight_dict={'loss_vfl': 1, 'loss_bbox': 5, 'loss_giou': 2, 'loss_fgl': 0.15, 'loss_ddf': 1.5},
+    alpha=0.75)
 
-    def state_dict(self):
-        """State dict, train/eval"""
-        state = {}
-        state['date'] = datetime.now().isoformat()
+criterion.to('cuda')
 
-        # For resume
-        state['last_epoch'] = self.last_epoch
+optimizer = AdamW(model.parameters(), lr=0.000125, weight_decay=1e-4)
 
-        for k, v in self.__dict__.items():
-            if hasattr(v, 'state_dict'):
-                v = self.model(v)
-                state[k] = v.state_dict()
-
-        return state
-    
-    def train_one_epoch(self,
-                    epoch: int, 
-                    max_norm: float = 0):
-                    
-        loss_value = 0.0
-
-        for i, (images, targets) in enumerate(tqdm(self.train_dataloader, desc=f"Training {epoch} Epoch: {loss_value}", leave=True)):
-            images = images.to(self.device)
-            targets = [{k: v.to(self.device) for k, v in t.items()} for t in targets]
-            print(targets)
-            global_step = epoch * len(self.train_dataloader) + i
-            metas = dict(epoch=epoch, step=i, global_step=global_step, epoch_step=len(self.train_dataloader))
-
-            with torch.autocast(device_type=str(self.device), cache_enabled=True):
-                outputs = self.model(images, targets=targets)
-
-            with torch.autocast(device_type=str(self.device), enabled=False):
-                loss_dict = self.criterion(outputs, targets, **metas)
-
-            loss = sum(loss_dict.values())
-            self.scaler.scale(loss).backward()
-
-            if max_norm > 0:
-                self.scaler.unscale_(self.optimizer)
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm)
-
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
-            self.optimizer.zero_grad()
-
-            self.ema.update(self.model)
-            self.lr_warmup_scheduler.step()
-
-            loss_value = sum(loss_dict.values())
-            print(f"Loss: {loss_value:.4f}")
-
-            if not math.isfinite(loss_value):
-                print("Loss is {}, stopping training".format(loss_value))
-                sys.exit(1)
-
-    def fit(self, epoches):
-        args = self.cfg
-        top1 = 0
-        best_stat = {'epoch': -1, }
-        if self.last_epoch > 0:
-            module = self.ema.module if self.ema else self.model
-            test_stats, coco_evaluator = evaluate(
-                module,
-                self.criterion,
-                self.postprocessor,
-                self.val_dataloader,
-                self.evaluator,
-                self.device
-            )
-            for k in test_stats:
-                best_stat['epoch'] = self.last_epoch
-                best_stat[k] = test_stats[k][0]
-                top1 = test_stats[k][0]
-                print(f'best_stat: {best_stat}')
-
-        best_stat_print = best_stat.copy()
-        start_epoch = self.last_epoch + 1
-        for epoch in range(start_epoch, epoches):
-
-            if epoch == self.train_dataloader.collate_fn.stop_epoch:
-                self.load_resume_state(str(self.output_dir / 'best_stg1.pth'))
-                self.ema.decay = self.train_dataloader.collate_fn.ema_restart_decay
-                print(f'Refresh EMA at epoch {epoch} with decay {self.ema.decay}')
-
-            train_stats = self.train_one_epoch(epoch, max_norm=args.clip_max_norm)
-
-            print(train_stats)
-
-            if self.lr_warmup_scheduler is None or self.lr_warmup_scheduler.finished():
-                self.lr_scheduler.step()
-
-            self.last_epoch += 1
-
-            if self.output_dir and epoch < self.train_dataloader.collate_fn.stop_epoch:
-                checkpoint_paths = [self.output_dir / 'last.pth']
-                # extra checkpoint before LR drop and every 100 epochs
-                if (epoch + 1) % args.checkpoint_freq == 0:
-                    checkpoint_paths.append(self.output_dir / f'checkpoint{epoch:04}.pth')
-
-            module = self.ema.module if self.ema else self.model
-            test_stats, coco_evaluator = evaluate(
-                module,
-                self.criterion,
-                self.postprocessor,
-                self.val_dataloader,
-                self.evaluator,
-                self.device
-            )
-
-            # TODO
-            for k in test_stats:
-                if k in best_stat:
-                    best_stat['epoch'] = epoch if test_stats[k][0] > best_stat[k] else best_stat['epoch']
-                    best_stat[k] = max(best_stat[k], test_stats[k][0])
-                else:
-                    best_stat['epoch'] = epoch
-                    best_stat[k] = test_stats[k][0]
-
-                if best_stat[k] > top1:
-                    best_stat_print['epoch'] = epoch
-                    top1 = best_stat[k]
-
-                best_stat_print[k] = max(best_stat[k], top1)
-                print(f'best_stat: {best_stat_print}')  # global best
-
-                if epoch >= self.train_dataloader.collate_fn.stop_epoch:
-                    best_stat = {'epoch': -1, }
-                    self.ema.decay -= 0.0001
-                    self.load_resume_state(str(self.output_dir / 'best_stg1.pth'))
-                    print(f'Refresh EMA at epoch {epoch} with decay {self.ema.decay}')
-
-            if coco_evaluator is not None:
-                (self.output_dir / 'eval').mkdir(exist_ok=True)
-                if "bbox" in coco_evaluator.coco_eval:
-                    filenames = ['latest.pth']
-                    if epoch % 50 == 0:
-                        filenames.append(f'{epoch:03}.pth')
-                    for name in filenames:
-                        torch.save(coco_evaluator.coco_eval["bbox"].eval,
-                                self.output_dir / "eval" / name)
-
-    def val(self, ):
-        self.eval()
-
-        module = self.ema.module if self.ema else self.model
-        test_stats, coco_evaluator = evaluate(module, self.criterion, self.postprocessor,
-                self.val_dataloader, self.evaluator, self.device)
-        print(test_stats)
-        return
-    
-
-@torch.no_grad()
-def evaluate(model: torch.nn.Module, criterion: torch.nn.Module, postprocessor, data_loader, coco_evaluator: CocoEvaluator, device):
-    model.eval()
-    criterion.eval()
-    coco_evaluator.cleanup()
-
-    iou_types = coco_evaluator.iou_types
-    for samples, targets in data_loader:
-        samples = samples.to(device)
-        targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
-
-        outputs = model(samples)
-
-        orig_target_sizes = torch.stack([t["orig_size"] for t in targets], dim=0)
-
-        results = postprocessor(outputs, orig_target_sizes)
-        res = {target['image_id'].item(): output for target, output in zip(targets, results)}
-        if coco_evaluator is not None:
-            coco_evaluator.update(res)
-
-    if coco_evaluator is not None:
-        coco_evaluator.accumulate()
-        coco_evaluator.summarize()
-
-    stats = {}
-    if coco_evaluator is not None:
-        if 'bbox' in iou_types:
-            stats['coco_eval_bbox'] = coco_evaluator.coco_eval['bbox'].stats.tolist()
-        if 'segm' in iou_types:
-            stats['coco_eval_masks'] = coco_evaluator.coco_eval['segm'].stats.tolist()
-
-    return stats, coco_evaluator
-
-
-if __name__ == '__main__':
-    cfg = Config()
-    solver = Trainer(cfg)
-    # solver.val()
-    solver.fit(10)
+for epoch in range(1):
+    for i, (images, targets) in tqdm.tqdm(enumerate(train_dataloader), total=len(train_dataloader)):
+        images = images.to('cuda')
+        targets = [{k: v.to("cuda") for k, v in t.items()} for t in targets]
+        outputs = model(images, targets=targets)
+        
+        loss_dict = criterion(outputs, targets)
+        loss = sum(loss_dict.values())
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        tqdm.tqdm.write(f"Epoch {epoch}, Step {i}, Loss: {loss.item()}")
+    print(epoch)
+    torch.save({
+        'epoch': epoch,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'loss': loss.item(),
+    }, "./last.pth")
+    print(f"Model saved at epoch {epoch}.")

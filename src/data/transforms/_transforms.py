@@ -1,8 +1,3 @@
-"""
-Copied from RT-DETR (https://github.com/lyuwenyu/RT-DETR)
-Copyright(c) 2023 lyuwenyu. All Rights Reserved.
-"""
-
 import torch
 import torch.nn as nn
 
@@ -19,53 +14,6 @@ from .._misc import convert_to_tv_tensor
 from .._misc import Image, Video, Mask, BoundingBoxes
 
 torchvision.disable_beta_transforms_warning()
-
-
-RandomPhotometricDistort = T.RandomPhotometricDistort()
-RandomZoomOut = T.RandomZoomOut()
-RandomHorizontalFlip = T.RandomHorizontalFlip()
-
-
-
-class EmptyTransform(T.Transform):
-    def __init__(self, ) -> None:
-        super().__init__()
-
-    def forward(self, *inputs):
-        inputs = inputs if len(inputs) > 1 else inputs[0]
-        return inputs
-
-
-class PadToSize(T.Pad):
-    _transformed_types = (
-        PIL.Image.Image,
-        Image,
-        Video,
-        Mask,
-        BoundingBoxes,
-    )
-    def _get_params(self, flat_inputs: List[Any]) -> Dict[str, Any]:
-        sp = F.get_spatial_size(flat_inputs[0])
-        h, w = self.size[1] - sp[0], self.size[0] - sp[1]
-        self.padding = [0, 0, w, h]
-        return dict(padding=self.padding)
-
-    def __init__(self, size, fill=0, padding_mode='constant') -> None:
-        if isinstance(size, int):
-            size = (size, size)
-        self.size = size
-        super().__init__(0, fill, padding_mode)
-
-    def _transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
-        fill = self._fill[type(inpt)]
-        padding = params['padding']
-        return F.pad(inpt, padding=padding, fill=fill, padding_mode=self.padding_mode)  # type: ignore[arg-type]
-
-    def __call__(self, *inputs: Any) -> Any:
-        outputs = super().forward(*inputs)
-        if len(outputs) > 1 and isinstance(outputs[1], dict):
-            outputs[1]['padding'] = torch.tensor(self.padding)
-        return outputs
 
 
 class RandomIoUCrop(T.RandomIoUCrop):
